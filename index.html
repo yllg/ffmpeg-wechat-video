@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Document</title>
+</head>
+<body>
+    <script src="./pixi.js"></script>
+    <br>
+    <button >测试页面卡顿</button>
+    <br>
+    <input type="file" id="input_file" required name="file" style="display:block" >
+    <script>
+        const workerPath = location.href.replace(location.href.split('/').pop(), '') + 'ffmpeg_asm.js';
+        // pixi 渲染
+        var app = new PIXI.Application();
+        document.body.appendChild(app.view);
+        // 初始化worker
+        const worker1 = processInWebWorker();
+        const worker2 = new Worker('./ffmpeg-worker-mp4.js');
+        //上传视频
+        let input = document.getElementById('input_file');
+        input.onchange = async function(event) {
+            const file = event.target.files[0];
+            const video_ArrayBuffer = await get_video_ArrayBuffer(file);
+            // 限制最大截图尺寸，截图过大可能会导致ffmpeg执行报错，而且减小尺寸加快截图速度
+            const video_base64_str = await get_base64_str(file);
+            const video_source_size = await get_source_size(video_base64_str);
+            const screenshots_size = get_screenshots_size(video_source_size.source_width, video_source_size.source_height);
+            // 创建截图的animate Sprite
+            console.log('开始截图，请稍等~');
+            post_screenshots_message(video_ArrayBuffer, 10, 10, screenshots_size.width, screenshots_size.height);
+            const textureArray = await get_textureArray();
+            const animatedSprite = create_AnimatedSprite(textureArray);
+            // 创建声音
+            var audio_ele = document.createElement("audio");
+            post_sound_message(video_ArrayBuffer);
+            audio_ele.src = await get_sound_base64();
+            console.log('使用草料二维码 (https://cli.im/url) 拿起微信试试吧~');
+            // 一起播放
+            animatedSprite.play();
+            audio_ele.play();
+        }
+
+        // 发送截图的ffmpeg命令
+        function post_screenshots_message(video_ArrayBuffer, quality = 5, num = 15, width = 200, height = 200) {
+            if(!video_ArrayBuffer) return;
+            worker1.postMessage({
+                type: 'command',
+                arguments: `-i 短视频.mp4 -qscale:v ${quality} -r ${num} -f image2 -s ${width}X${height} %d.jpg`.split(' '),
+                files: [{
+                        data: new Uint8Array(video_ArrayBuffer),
+                        name: "短视频.mp4",
+                }],
+            });
+        };
+
+        // 发送获取声音的命令
+        function post_sound_message(arrayBuffer) {
+            worker2.postMessage({
+                type: 'run',
+                MEMFS: [{ name: 'video.mp4', data: arrayBuffer }],
+                arguments: `-i video.mp4 sound.mp3`.split(' '),
+            });
+        }
+
+        async function get_textureArray () {
+            return new Promise((resolve) => {
+                worker1.onmessage = function(event) {
+                var message = event.data;
+                if (message.type == "done") {
+                    console.log(`获取视频截图 成功！一共截了${message.data.length}张！`);
+                    let textureArray = [];
+                    message.data.forEach((imgObj) => {
+                        imgObj.data = transformArrayBufferToBase64(imgObj.data);
+                        let texture = PIXI.Texture.fromImage(imgObj.data);
+                        textureArray.push(texture);
+                    });
+                    resolve(textureArray);
+                }
+            };
+            })
+        }
+
+        function create_AnimatedSprite(textureArray) {
+            let animatedSprite = new PIXI.extras.AnimatedSprite(textureArray);
+            animatedSprite.position.x = 0;
+            animatedSprite.position.y = 0;
+            animatedSprite.scale.x = 1;
+            animatedSprite.scale.y = 1;
+            // 每秒10张图 对应的速度为10/60
+            animatedSprite.animationSpeed = parseFloat((10 / 60).toFixed(2));
+            animatedSprite.loop = false;
+            app.stage.addChild(animatedSprite);
+            return animatedSprite;
+        }
+
+        async function get_sound_base64 () {
+            return new Promise((resolve) => {
+                worker2.onmessage = (e) => {
+                    let message = e.data;
+                    if (message.type === 'done') {
+                        let memfs = message.data.MEMFS.pop();
+                        if (memfs === undefined) return;
+                        const mp3base64 = transformUint8ArrayToBase64(memfs.data);
+                        console.log('获取视频的声音 成功！');
+                        resolve(mp3base64);
+                        delete message.data;
+                    }
+                }
+            })
+        }
+
+        // 工具方法
+        // 初始化worker1
+        function processInWebWorker() {
+            var blob = URL.createObjectURL(new Blob(['importScripts("' + workerPath + '");var now = Date.now;function print(text) {postMessage({"type" : "stdout","data" : text});};onmessage = function(event) {var message = event.data;if (message.type === "command") {var Module = {print: print,printErr: print,files: message.files || [],arguments: message.arguments || [],TOTAL_MEMORY: message.TOTAL_MEMORY || false};postMessage({"type" : "start","data" : Module.arguments.join(" ")});postMessage({"type" : "stdout","data" : "Received command: " +Module.arguments.join(" ") +((Module.TOTAL_MEMORY) ? ".  Processing with " + Module.TOTAL_MEMORY + " bits." : "")});var time = now();var result = ffmpeg_run(Module);var totalTime = now() - time;postMessage({"type" : "stdout","data" : "Finished processing (took " + totalTime + "ms)"});postMessage({"type" : "done","data" : result,"time" : totalTime});}};postMessage({"type" : "ready"});'], {
+                type: 'application/javascript'
+            }));
+
+            var worker = new Worker(blob);
+            URL.revokeObjectURL(blob);
+            return worker;
+        }
+
+        // 获取video的ArrayBuffer数据;
+        async function get_video_ArrayBuffer (videoBlob) {
+            return new Promise((resolve) => {
+                var fileReader = new FileReader();
+                fileReader.onloadend = function() {
+                    if (fileReader.result !== null) {
+                        resolve(fileReader.result);
+                    }
+                    else {
+                        console.log('Array buffer rejected');
+                        reject();
+                    }
+                };
+                fileReader.readAsArrayBuffer(videoBlob);
+            })
+        }
+
+        // ArrayBuffer转base64图片
+        function transformArrayBufferToBase64 (buffer) {
+            var binary = '';
+            var bytes = new Uint8Array(buffer);
+            for (var len = bytes.byteLength, i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return 'data:image/jpg;base64,' + window.btoa(binary);
+        }
+
+        // Uint8Array转mp3的base64字符串
+        function transformUint8ArrayToBase64 (bytes) {
+            var binary = '';
+            for (var len = bytes.byteLength, i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return 'data:audio/mp3;base64,' + window.btoa(binary);
+        }
+
+        // file to bast64
+        async function get_base64_str(file) {
+            const reader = new FileReader();
+            return await new Promise((resolve) => {
+                reader.onloadend = () => {
+                resolve(reader.result);
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+        
+        // 获取视频原始宽高
+        async function get_source_size(base64_str) {
+            const video = document.createElement('video');
+            video.src = base64_str;
+            return new Promise((resolve) => {
+                video.onloadeddata = () => {
+                    resolve({source_width: video.videoWidth, source_height: video.videoHeight});
+                };
+            })
+        }
+
+        // 计算截图尺寸
+        function get_screenshots_size(width, height) {
+            let screenshots_size = {
+                width:width,
+                height:height,
+            };
+            if (width > 640 && height > 640) {
+                if (width > height) {
+                screenshots_size = {
+                    width:640,
+                    height:360,
+                };
+                } else {
+                screenshots_size = {
+                    width:360,
+                    height:640,
+                };
+                }
+            }
+            return screenshots_size;
+        }
+
+    </script>
+</body>
+</html>
