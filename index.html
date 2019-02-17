@@ -17,37 +17,39 @@
         // pixi 渲染
         var app = new PIXI.Application();
         document.body.appendChild(app.view);
-        // 初始化worker
-        const worker1 = processInWebWorker();
-        const worker2 = new Worker('./ffmpeg-worker-mp4.js');
         //上传视频
         let input = document.getElementById('input_file');
         input.onchange = async function(event) {
             const file = event.target.files[0];
             const video_ArrayBuffer = await get_video_ArrayBuffer(file);
+            // 初始化worker
+            const worker1 = processInWebWorker();
+            const worker2 = new Worker('./ffmpeg-worker-mp4.js');
             // 限制最大截图尺寸，截图过大可能会导致ffmpeg执行报错，而且减小尺寸加快截图速度
             const video_base64_str = await get_base64_str(file);
             const video_source_size = await get_source_size(video_base64_str);
             const screenshots_size = get_screenshots_size(video_source_size.source_width, video_source_size.source_height);
             // 创建截图的animate Sprite
             console.log('开始截图，请稍等~');
-            post_screenshots_message(video_ArrayBuffer, 10, 10, screenshots_size.width, screenshots_size.height);
-            const textureArray = await get_textureArray();
+            post_screenshots_message(worker1, video_ArrayBuffer, 10, 10, screenshots_size.width, screenshots_size.height);
+            const textureArray = await get_textureArray(worker1);
             const animatedSprite = create_AnimatedSprite(textureArray);
             // 创建声音
             var audio_ele = document.createElement("audio");
-            post_sound_message(video_ArrayBuffer);
-            audio_ele.src = await get_sound_base64();
+            post_sound_message(worker2, video_ArrayBuffer);
+            audio_ele.src = await get_sound_base64(worker2);
             console.log('使用草料二维码 (https://cli.im/url) 拿起微信试试吧~');
+            worker1.terminate();
+            worker2.terminate();
             // 一起播放
             animatedSprite.play();
             audio_ele.play();
         }
 
         // 发送截图的ffmpeg命令
-        function post_screenshots_message(video_ArrayBuffer, quality = 5, num = 15, width = 200, height = 200) {
+        function post_screenshots_message(worker, video_ArrayBuffer, quality = 5, num = 15, width = 200, height = 200) {
             if(!video_ArrayBuffer) return;
-            worker1.postMessage({
+            worker.postMessage({
                 type: 'command',
                 arguments: `-i 短视频.mp4 -qscale:v ${quality} -r ${num} -f image2 -s ${width}X${height} %d.jpg`.split(' '),
                 files: [{
@@ -58,17 +60,17 @@
         };
 
         // 发送获取声音的命令
-        function post_sound_message(arrayBuffer) {
-            worker2.postMessage({
+        function post_sound_message(worker, arrayBuffer) {
+            worker.postMessage({
                 type: 'run',
                 MEMFS: [{ name: 'video.mp4', data: arrayBuffer }],
                 arguments: `-i video.mp4 sound.mp3`.split(' '),
             });
         }
 
-        async function get_textureArray () {
+        async function get_textureArray (worker) {
             return new Promise((resolve) => {
-                worker1.onmessage = function(event) {
+                worker.onmessage = function(event) {
                 var message = event.data;
                 if (message.type == "done") {
                     console.log(`获取视频截图 成功！一共截了${message.data.length}张！`);
@@ -97,9 +99,9 @@
             return animatedSprite;
         }
 
-        async function get_sound_base64 () {
+        async function get_sound_base64 (worker) {
             return new Promise((resolve) => {
-                worker2.onmessage = (e) => {
+                worker.onmessage = (e) => {
                     let message = e.data;
                     if (message.type === 'done') {
                         let memfs = message.data.MEMFS.pop();
